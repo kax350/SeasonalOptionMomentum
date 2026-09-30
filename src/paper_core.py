@@ -85,7 +85,7 @@ def max_drawdown(ret, rf=None):
     cum = rr.cumprod()
     prior = cum.cummax().shift(1)
     dd = (cum / prior - 1).min()
-    return min(-dd, 1.0) if pd.notna(dd) else np.nan
+    return min(max(-dd, 0.0), 1.0) if pd.notna(dd) else np.nan
 
 
 def factor_stats(ret, rf=None, nw_lags=3, periods_per_year=12):

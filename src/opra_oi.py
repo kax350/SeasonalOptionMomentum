@@ -13,7 +13,7 @@ LEDGER = os.path.join(DATA, "databento_pull_log.csv")
 OI_DIR = os.path.join(DATA, "opra", "oi")
 
 
-def fetch_oi(client, date: dt.date, symbols, chunk=400):
+def fetch_oi(client, date: dt.date, symbols, chunk=200):
     os.makedirs(OI_DIR, exist_ok=True)
     out = os.path.join(OI_DIR, f"{date}.parquet")
     if os.path.exists(out):

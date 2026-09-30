@@ -118,6 +118,8 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
     date_ts = pd.Timestamp(date)
     o = chain.copy()
     o = o.rename(columns={"bid": "best_bid", "ask": "best_offer", "strike": "strike_price", "cp": "cp_flag"})
+    if sample == "sort":  # spec P22: undefined bid with a defined ask = zero bid (kept in sorting sample)
+        o.loc[o["best_bid"].isna() & o["best_offer"].notna(), "best_bid"] = 0.0
     o = o[o["best_bid"].notna() & o["best_offer"].notna()]
     if sample == "hold":
         if oi is not None:

@@ -23,6 +23,8 @@ def main(snap_dir=os.path.join(DATA, "opra", "close_snap")):
     os.makedirs(os.path.join(OUT, "by_date"), exist_ok=True)
     stk, rates = StockData(), RateCurve()
     files = sorted(glob.glob(os.path.join(snap_dir, "20*.parquet")))
+    from equity_vix import implied_spots, next_standard_expiry
+    from calendar_utils import formation_dates
     for f in files:
         d = dt.date.fromisoformat(os.path.basename(f)[:10])
         outp = os.path.join(OUT, "by_date", f"{d}.parquet")
@@ -31,14 +33,34 @@ def main(snap_dir=os.path.join(DATA, "opra", "close_snap")):
         t = time.time()
         snap = pd.read_parquet(f)
         ch = select_chain(snap, d)
+        # expiration-day snapshot of the traded series (next formation date = exdate_trade)
+        tf, xdt = next_standard_expiry(d)
+        fx = os.path.join(snap_dir, f"{xdt}.parquet")
+        if not os.path.exists(fx):
+            print(d, "skip: expiration-day snapshot not yet available", flush=True)
+            continue
+        snx = pd.read_parquet(fx)
+        for c in ("root", "cp"):
+            snx[c] = snx[c].astype(str)
+        exps = set(ch["expiration"].unique())
+        expiring = snx[snx["expiration"].isin(exps) & snx["ask"].notna()].copy()
+        expiring["bid"] = expiring["bid"].fillna(0.0)  # undefined bid = zero bid (spec P22)
+        ref = ch["root"].drop_duplicates().pipe(lambda r: pd.Series(stk.root_to_ticker(r).map(stk.close_on(d)).values, index=r.values))
+        spot_check = implied_spots(ch[ch["bid"].notna() & ch["ask"].notna()], d, rates, ref_spot=ref)
+        xq = expiring.assign(symbol=expiring["symbol"].astype(str)).groupby("symbol")[["bid", "ask"]].first()
+        chx = select_chain(snx, xdt)
+        refx = chx["root"].drop_duplicates().pipe(lambda r: pd.Series(stk.root_to_ticker(r).map(stk.close_on(xdt)).values, index=r.values))
+        sce = implied_spots(chx[chx["bid"].notna() & chx["ask"].notna()], xdt, rates, ref_spot=refx)["S_impl_start"]
+        cov = float(ch["symbol"].astype(str).isin(set(xq.index)).mean())  # feed regime (see build_firm_months)
         parts = []
         for smp in ("sort", "hold"):
-            fm = build_firm_months(d, ch, stk, rates, sample=smp)
+            fm = build_firm_months(d, ch, stk, rates, sample=smp, spot_check=spot_check, x_quotes=xq, spot_check_end=sce,
+                                   x_coverage=cov)
             if len(fm):
                 parts.append(fm[[c for c in KEEP if c in fm.columns]])
         if parts:
             pd.concat(parts, ignore_index=True).to_parquet(outp, index=False)
-        print(d, "chain", len(ch), "firms", [len(p) for p in parts], f"{time.time()-t:.1f}s", flush=True)
+        print(d, "chain", len(ch), "firms", [len(p) for p in parts], f"x_cov={cov:.2f}", f"{time.time()-t:.1f}s", flush=True)
     allp = [pd.read_parquet(p) for p in sorted(glob.glob(os.path.join(OUT, "by_date", "*.parquet")))]
     panel = pd.concat(allp, ignore_index=True)
     panel[panel["sample"] == "sort"].to_parquet(os.path.join(OUT, "vix_sort.parquet"), index=False)

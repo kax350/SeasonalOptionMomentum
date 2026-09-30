@@ -41,6 +41,8 @@ def load_symbols() -> pd.DataFrame:
 def load_ohlcv(start="2012-06-01") -> pd.DataFrame:
     df = pd.read_parquet(os.path.join(SDIR, "ohlcv.parquet"), columns=["date", "act_symbol", "close", "volume"])
     df["date"] = pd.to_datetime(df["date"])
+    df["close"] = df["close"].astype("float64")      # DoltHub decimals load as nullable Float64
+    df["volume"] = df["volume"].astype("float64")
     df = df[df["date"] >= pd.Timestamp(start)]
     df = df.sort_values(["act_symbol", "date"]).reset_index(drop=True)
     df["ret"] = df.groupby("act_symbol")["close"].pct_change()
@@ -50,6 +52,7 @@ def load_ohlcv(start="2012-06-01") -> pd.DataFrame:
 def load_dividends() -> pd.DataFrame:
     d = pd.read_parquet(os.path.join(SDIR, "dividend.parquet"))
     d["ex_date"] = pd.to_datetime(d["ex_date"])
+    d["amount"] = d["amount"].astype("float64")
     return d[d["amount"] > 0]
 
 

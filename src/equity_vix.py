@@ -113,8 +113,22 @@ def select_chain(snap: pd.DataFrame, date: dt.date):
 
 
 def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rates: RateCurve,
-                      sample: str = "hold", oi: pd.DataFrame = None):
-    """Return per-(root,date) DataFrame with VIX_Prc, Dynamic_VIX_Return_Corridor, etc."""
+                      sample: str = "hold", oi: pd.DataFrame = None, spot_check: pd.DataFrame = None, tol=0.05,
+                      x_quotes: pd.Series = None, tol_end=0.03, spot_check_end: pd.Series = None,
+                      x_coverage: float = 1.0):
+    """Return per-(root,date) DataFrame with VIX_Prc, Dynamic_VIX_Return_Corridor, etc.
+    PROXY data hygiene (replaces CRSP PERMNO linking; uses quotes only, never returns):
+      spot_check: option-implied spot at formation; drop if |S_impl/St_start - 1| > tol.
+      x_quotes:   bid/ask of the held series on the expiration day (15:59); for the K0 put and K1 call the
+                  intrinsic value at DoltHub's St_end must lie within [bid, ask] +/- tol_end*St_end,
+                  otherwise the firm-month is dropped (renamed/adjusted contracts, ticker reuse, bad prints).
+      spot_check_end: option-implied spot on the expiration day from the NEXT-month chain; used only when
+                  neither held leg is quoted on the expiration day.
+      x_coverage: market-wide share of the formation chain's series present on the expiration-day snapshot.
+                  >= 0.9 (feed lists unquoted series, pre-2025): both held legs missing => contracts were
+                  renamed/adjusted => drop.  < 0.9 (2025+ feed omits unquoted expiring series): drop only if
+                  both legs missing AND (|S_impl_end/St_end-1| > tol OR a one-day |log return| > ln 2 in the
+                  holding window, i.e. a ticker splice)."""
     date_ts = pd.Timestamp(date)
     o = chain.copy()
     o = o.rename(columns={"bid": "best_bid", "ask": "best_offer", "strike": "strike_price", "cp": "cp_flag"})
@@ -228,6 +242,9 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
     # SAS: Option_TerminalPayoff computed only where stock_prc_end is not missing
     fm = fm.join(si).join(dmin).join(dmax).join(num_put).join(num_call)
     fm = fm[fm["St_end"].notna()]
+    if spot_check is not None:
+        dev0 = np.abs(spot_check["S_impl_start"].reindex(fm.index) / fm["St_start"] - 1)
+        fm = fm[~(dev0 > tol).fillna(False).astype(bool)]  # NaN (parity not computable) is kept
     fm["Rf"] = np.exp(fm["linear_rate"] / 100 * fm["days_expire"] / 365)
     A = (fm.K1 - fm.K0) / 3 * (1 / fm.K0 ** 2 - 1 / fm.K1 ** 2) + (2 / fm.Forward - 1 / fm.K0 - 1 / fm.K1)
     B = (fm.K1 - fm.K0) / 3 * (1 / fm.K1 - 1 / fm.K0) + (np.log(fm.Forward / fm.K0) + np.log(fm.Forward / fm.K1))
@@ -260,6 +277,7 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
         (1 + daily["ret"] - Rf_daily ** gap) * Rf_daily ** tt
     daily["DHC_Theory"] = 2 * (daily["Forward_daily"] / daily["FDC"]) * (daily["FDC"] / lagFDC - 1)
     daily["ret2"] = daily["ret"] ** 2
+    daily["alr"] = np.log1p(daily["ret"]).abs()
     Amap = A.reindex(fm.index)
     stat = Amap - 2 / (fm.St_start * fm.Rf)
     daily["n_sh"] = daily["root"].map(stat) + 2 / daily["FDC"]
@@ -274,9 +292,30 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
     hp = daily.groupby("root").agg(Delta_Hedge_payoff_Corridor=("Delta_Hedge_Corridor", "sum"),
                                    Delta_Hedge_payoff=("Delta_Hedge_Reinvt", "sum"),
                                    Delta_Hedge_Corridor_Theory=("DHC_Theory", "sum"),
-                                   Monthly_RV=("ret2", "sum"), n_days=("date", "size"))
+                                   Monthly_RV=("ret2", "sum"), n_days=("date", "size"), max_abs_logret=("alr", "max"))
     fm = fm.join(hp).join(to)
     fm["hedge_turnover"] = fm["hedge_turnover"] + fm["hedge_close"]  # $ stock traded per unit of VIX portfolio
+    if x_quotes is not None:
+        k0 = o[(o["strike_price"] == o["K0"]) & (o["cp_flag"] == "P")].groupby("root")["symbol"].first()
+        k1 = o[(o["strike_price"] == o["K1"]) & (o["cp_flag"] == "C")].groupby("root")["symbol"].first()
+        def dist(sym, intr):  # distance of intrinsic value outside the expiration-day [bid, ask]
+            b = sym.map(x_quotes["bid"]).reindex(fm.index)
+            a = sym.map(x_quotes["ask"]).reindex(fm.index)
+            return np.maximum(np.maximum(b - intr, intr - a), 0.0)
+        e0 = dist(k0, np.maximum(fm["K0"] - fm["St_end"], 0))
+        e1 = dist(k1, np.maximum(fm["St_end"] - fm["K1"], 0))
+        err = pd.concat([e0, e1], axis=1).max(axis=1)  # max over the available legs (NaN if both missing)
+        fm["end_check_err"] = err / fm["St_end"]
+        bad = (fm["end_check_err"] > tol_end).fillna(False).astype(bool)
+        both_missing = fm["end_check_err"].isna()
+        if x_coverage >= 0.9:
+            bad = bad | both_missing
+        else:
+            dev1 = (spot_check_end.reindex(fm.index) / fm["St_end"] - 1).abs() if spot_check_end is not None \
+                else pd.Series(np.nan, index=fm.index)
+            jump = fm["max_abs_logret"] > np.log(2)
+            bad = bad | (both_missing & ((dev1 > tol).fillna(False).astype(bool) | jump.fillna(False).astype(bool)))
+        fm = fm[~bad]
     fm["Dynamic_VIX_Payoff_Corridor"] = fm.Static_VIX_Payoff - 2 * (fm.St_end / fm.St_start / fm.Rf - 1) + \
         fm.Delta_Hedge_payoff_Corridor
     fm["Dynamic_VIX_Return_Corridor"] = fm.Dynamic_VIX_Payoff_Corridor / fm.VIX_Prc - 1
@@ -332,3 +371,30 @@ class StockData:
         t = set(tickers)
         x = self.px[(self.px["date"] >= start) & (self.px["date"] <= end) & self.px["act_symbol"].isin(t)]
         return x.rename(columns={"act_symbol": "ticker"})[["ticker", "date", "close", "ret"]]
+
+
+def implied_spots(chain: pd.DataFrame, date, rates: "RateCurve", ref_spot: pd.Series = None):
+    """Robust option-implied spot per root at formation from the traded next-month chain:
+    median over strikes within +/-15% of the reference spot of K + e^{rT}(C - P), discounted, using
+    only strikes where both C and P have bid > 0 and relative spread < 50%. Roots with fewer than two
+    usable strikes get NaN (no check). Vectorised."""
+    ch = chain[(chain["bid"] > 0) & (chain["ask"] > 0)].copy()
+    if ch.empty:
+        return pd.DataFrame(columns=["S_impl_start", "n_parity"])
+    ch["mid"] = (ch["bid"] + ch["ask"]) / 2
+    ch = ch[(ch["ask"] - ch["bid"]) / ch["mid"] < 0.5]
+    days = (ch["exdate_trade"].iloc[0] - pd.Timestamp(date)).days
+    r = float(rates.linear_rate(pd.Timestamp(date), [days])[0]) / 100
+    T = days / 365
+    pv = ch.pivot_table(index=["root", "strike"], columns="cp", values="mid", aggfunc="first").dropna()
+    if pv.empty or "C" not in pv or "P" not in pv:
+        return pd.DataFrame(columns=["S_impl_start", "n_parity"])
+    pv = pv.reset_index()
+    pv["S_k"] = (pv["strike"] + np.exp(r * T) * (pv["C"] - pv["P"])) * np.exp(-r * T)
+    if ref_spot is not None:
+        ref = pv["root"].map(ref_spot)
+        pv = pv[(pv["strike"] / ref - 1).abs() <= 0.15]
+    g = pv.groupby("root")["S_k"]
+    out = pd.DataFrame({"S_impl_start": g.median(), "n_parity": g.size()})
+    out.loc[out["n_parity"] < 2, "S_impl_start"] = np.nan
+    return out

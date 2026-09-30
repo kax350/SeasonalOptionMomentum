@@ -108,7 +108,8 @@ def main():
     for c, (e, tk) in COSTS.items():
         d[f"rL_{c}"] = leg_returns(d, e, tk, +1)
         d[f"rS_{c}"] = leg_returns(d, e, tk, -1)
-    d.to_parquet(os.path.join(OUT, "firm_month_costs.parquet"), index=False)
+    os.makedirs(os.path.join(DATA, "derived"), exist_ok=True)
+    d.to_parquet(os.path.join(DATA, "derived", "firm_month_costs.parquet"), index=False)  # quote-derived: keep out of the public repo
 
     periods = {"overlap_2014_2020": ("2014-01-01", "2020-12-31"), "post_2021_2026": ("2021-01-01", "2026-12-31"),
                "dev_2021_2023": ("2021-01-01", "2023-12-31"), "hold_2024_2025": ("2024-01-01", "2025-12-31"),

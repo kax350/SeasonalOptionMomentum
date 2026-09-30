@@ -75,9 +75,15 @@ def hv_iv(u, px_roots, F, panel_close):
 
 def _work(args):
     F, X, entry_when, names, paths = args
+    cache = os.path.join(OUTD, f"by_month_{entry_when}", f"{F}.parquet")
+    if os.path.exists(cache):
+        return F, pd.read_parquet(cache), 0.0
     rates = RateCurve()
     t = time.time()
     df = evaluate_month(F, X, entry_when, rates, paths, names=names)
+    if len(df):
+        os.makedirs(os.path.dirname(cache), exist_ok=True)
+        df.to_parquet(cache, index=False)
     return F, df, time.time() - t
 
 
@@ -92,6 +98,8 @@ def main(entry_when="1545", start="2019-06", end="2026-08", workers=3):
     sort_panel = pd.read_parquet(os.path.join(DATA, "panel", "vix_sort.parquet"))
     unis, jobs = [], []
     for F, X in pairs:
+        if not os.path.exists(os.path.join(DATA, "opra", "snap_1500", f"{X}.parquet")):
+            print("no exit snapshot yet", X, flush=True); continue
         u = month_universe(F, X, stk, sc[sc["F"] == pd.Timestamp(F)], entry_when, px)
         if u is None:
             print("no entry snapshot", F, flush=True); continue

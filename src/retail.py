@@ -131,9 +131,9 @@ def fill(bid, ask, sign, e):
 
 
 def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: RateCurve, px_daily: pd.DataFrame,
-                   names=None, exit_when="1500"):
+                   names=None, exit_when="1500", kinds_by_root=None):
     ch = load_chain(F_date, entry_when)
-    ex = load_chain_exit(X_date, exit_when)
+    ex = load_chain_exit(X_date, exit_when, roots=names)
     if ch is None or ex is None:
         return pd.DataFrame()
     chx, spot_x = ex
@@ -158,7 +158,7 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
         g.loc[g["iv"].isna(), "delta"] = np.nan
         Sx = spot_x.get(root, np.nan) * np.exp(-r * 28 / 365)   # next-month forward at X 15:00 -> spot
         path = px_daily.get(root) if px_daily is not None else None
-        for kind in KINDS:
+        for kind in (kinds_by_root.get(root, KINDS) if kinds_by_root else KINDS):
             for side in (1, -1):
                 legs = build_legs(g, kind, side, Fw)
                 if legs is None:
@@ -228,32 +228,38 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
     return pd.DataFrame(rows)
 
 
-def load_chain_exit(X_date: dt.date, when: str):
-    """All quotes on the exit date (any expiry), plus implied spot per root from its next-month chain."""
+def load_chain_exit(X_date: dt.date, when: str, roots=None):
+    """All quotes on the exit date (any expiry), plus implied spot per root from its next-month chain
+    (vectorised robust put-call parity, see equity_vix.implied_spots)."""
+    from equity_vix import implied_spots
     p = os.path.join(SNAP[when], f"{X_date}.parquet")
     if not os.path.exists(p):
         return None
     snap = pd.read_parquet(p)
     for c in ("root", "cp", "symbol"):
         snap[c] = snap[c].astype(str)
-    snap = snap[snap["bid"].notna() & snap["ask"].notna()]
+    if roots is not None:
+        snap = snap[snap["root"].isin(set(roots))]
+    snap = snap[snap["ask"].notna()].copy()
+    snap["bid"] = snap["bid"].fillna(0.0)
     nxt = select_chain(snap, X_date)
-    nxt = nxt[(nxt["bid"] > 0) & (nxt["ask"] > 0)]
-    nxt["mid"] = (nxt["bid"] + nxt["ask"]) / 2
-    tf, et = next_standard_expiry(X_date)
-    T = ((pd.Timestamp(et) - pd.Timestamp(X_date)).days + 1 / 24) / 365
-    spot = {}
-    for root, g in nxt.groupby("root"):
-        f = implied_forward(g, 0.0, T)
-        if np.isfinite(f):
-            spot[root] = f
-    return snap, spot
+    sp = implied_spots(nxt, X_date, _ZERO_RATE)["S_impl_start"] if len(nxt) else pd.Series(dtype=float)
+    return snap, sp.to_dict()
+
+
+class _ZeroRate:
+    def linear_rate(self, date, days):
+        return np.zeros(len(days))
+
+
+_ZERO_RATE = _ZeroRate()
 
 
 def hedge_sim(legs, g, S0, Sx, path: pd.Series, F_date, X_date, exdate_trade, r, entry_when):
     """Per-unit stock-hedge P&L for H1 (daily) and H2 (threshold 0.15 / 0.25 delta per unit).
     Deltas: Black-Scholes with each leg's entry IV (sticky strike), spot = daily close (PROXY for
-    15:45), entry at the 15:45 implied spot, exit at the 15:00 implied spot on X (fallback: close of X)."""
+    15:45), entry at the 15:45 implied spot, exit at the 15:00 implied spot on X (fallback: close of X).
+    Vectorised over marks x legs."""
     Ks = np.array([row["strike"] for row, _ in legs], float)
     cps = np.array([row["cp"] for row, _ in legs])
     sg = np.array([s for _, s in legs], float)
@@ -261,43 +267,38 @@ def hedge_sim(legs, g, S0, Sx, path: pd.Series, F_date, X_date, exdate_trade, r,
     if np.isnan(ivs).any():
         med = np.nanmedian(g["iv"]) if g["iv"].notna().any() else 0.3
         ivs = np.where(np.isnan(ivs), med, ivs)
-    expiry = pd.Timestamp(exdate_trade) + pd.Timedelta(hours=16)
-
-    def D(S, t):
-        T = max((expiry - t).total_seconds() / 86400 / 365, 1e-6)
-        d, _, _, _ = _bs(S, Ks, T, r, ivs, cps)
-        return 100 * float(np.sum(sg * d))   # shares of delta per unit
-
     days = path[(path.index > pd.Timestamp(F_date)) & (path.index < pd.Timestamp(X_date))]
     S_exit = Sx if np.isfinite(Sx) else path.get(pd.Timestamp(X_date), np.nan)
-    t0 = pd.Timestamp(F_date) + pd.Timedelta(hours=HOURS[entry_when])
-    marks = [(t0, S0)] + [(t + pd.Timedelta(hours=16), float(v)) for t, v in days.items()]
     out = {}
     if not np.isfinite(S_exit):
         for pol in ("H1", "H2_15", "H2_25"):
-            out.update({f"hedge_pnl_{pol}": np.nan})
+            out[f"hedge_pnl_{pol}"] = np.nan
         return out
+    exp_days = (pd.Timestamp(exdate_trade) - pd.Timestamp(F_date)).days + 16 / 24
+    t_mark = np.concatenate([[HOURS[entry_when] / 24], (days.index - pd.Timestamp(F_date)).days.values + 16 / 24])
+    S_mark = np.concatenate([[S0], days.values.astype(float)])
+    T = np.maximum((exp_days - t_mark) / 365, 1e-6)[:, None]
+    Sm = S_mark[:, None]
+    sq = ivs[None, :] * np.sqrt(T)
+    d1 = (np.log(Sm / Ks[None, :]) + (r + 0.5 * ivs[None, :] ** 2) * T) / sq
+    dl = np.where(cps[None, :] == "C", norm.cdf(d1), norm.cdf(d1) - 1)
+    D = 100 * (dl * sg[None, :]).sum(axis=1)          # position delta (shares) per unit at each mark
+    gaps = np.diff(t_mark)
     for pol, thr in (("H1", 0.0), ("H2_15", 15.0), ("H2_25", 25.0)):
         h, pnl, traded_sh, traded_notional, n_tr, borrow = 0.0, 0.0, 0.0, 0.0, 0, 0.0
-        prev_S, prev_t = None, None
-        for i, (t, S) in enumerate(marks):
-            if prev_S is not None:
-                pnl += h * (S - prev_S)
+        for i in range(len(S_mark)):
+            if i > 0:
+                pnl += h * (S_mark[i] - S_mark[i - 1])
                 if h < 0:
-                    borrow += -h * prev_S * BORROW * max((t - prev_t).days, 1) / 365
-            Dt = D(S, t)
-            expo = Dt + h
-            rebalance = True if thr == 0.0 else abs(expo) > thr   # H1: every mark; H2: only beyond threshold
-            if rebalance:
-                trade = -Dt - h
+                    borrow += -h * S_mark[i - 1] * BORROW * max(gaps[i - 1], 1.0) / 365
+            if thr == 0.0 or abs(D[i] + h) > thr:
+                trade = -D[i] - h
                 if abs(trade) > 1e-9:
-                    traded_sh += abs(trade); traded_notional += abs(trade) * S; n_tr += 1
-                h = -Dt
-            prev_S, prev_t = S, t
-        # close hedge at exit
-        pnl += h * (S_exit - prev_S)
+                    traded_sh += abs(trade); traded_notional += abs(trade) * S_mark[i]; n_tr += 1
+                h = -D[i]
+        pnl += h * (S_exit - S_mark[-1])
         if h < 0:
-            borrow += -h * prev_S * BORROW * 1 / 365
+            borrow += -h * S_mark[-1] * BORROW / 365
         if abs(h) > 1e-9:
             traded_sh += abs(h); traded_notional += abs(h) * S_exit; n_tr += 1
         out[f"hedge_pnl_{pol}"] = pnl

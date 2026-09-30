@@ -232,7 +232,9 @@ def benchmark_grid(uni, pos):
 
 
 def dev_selection(uni, pos):
-    """A11 hierarchy on DEVELOPMENT months only."""
+    """A11 hierarchy on DEVELOPMENT months only (exit month X in 2021-01 ... 2023-12, ledger A10)."""
+    pos = pos[(pos["X"] >= pd.Timestamp("2021-01-01")) & (pos["X"] <= DEV_END)]
+    uni = uni[(uni["X"] >= pd.Timestamp("2021-01-01")) & (uni["X"] <= DEV_END)]
     log = []
     configs = []
     for K in (3, 2, 1):

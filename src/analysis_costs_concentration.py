@@ -20,6 +20,10 @@ COSTS = {"COST0_mid": (0.0, False), "COST1_e25": (0.25, False), "COST2_e50": (0.
 HEDGE_BPS = 0.0002
 
 
+def fl(x):
+    return float(x) if pd.notna(x) else np.nan
+
+
 def leg_returns(d: pd.DataFrame, e: float, tick: bool, side: int, hedge_bps=HEDGE_BPS):
     """Excess return of buying (side=+1) / the 'long-equivalent' return of the shorted VIX portfolio
     (side=-1) at cost level e. Returns the series that enters Q5 (side +1) or Q1 (side -1)."""
@@ -87,6 +91,9 @@ def main():
     d = p[p["fvar"].notna() & p["vix_posoi"].notna()][["id", "ticker", "date", "date_var", "fvar", "pct", "q"]].merge(
         hold, on=["id", "date_var"], how="left", suffixes=("", "_h"))
     d = d[d["date_var"] >= "2014-01-01"]
+    for c in d.columns:  # nullable pandas dtypes -> plain numpy
+        if str(d[c].dtype) in ("Float64", "Int64", "boolean"):
+            d[c] = d[c].astype("float64")
     # liquidity flags (paper-level L at the 15:59 snapshot)
     liq = close_liquidity().rename(columns={"root": "id"})
     d = d.merge(liq, on=["date", "id"], how="left")
@@ -135,11 +142,11 @@ def main():
                     x = ss[(ss.index >= a0) & (ss.index <= a1)]
                     st = factor_stats(x) if len(x) > 2 else {}
                     st.update({"universe": uni, "K": kname, "cost": c, "skip": skip, "period": per,
-                               "long_leg_mean": float(a[(a.index >= a0) & (a.index <= a1)].mean()),
-                               "short_leg_mean": float(b[(b.index >= a0) & (b.index <= a1)].mean()),
-                               "avg_names_per_side": float(hi[(hi.date_var >= a0) & (hi.date_var <= a1)].groupby("date_var").size().mean()),
-                               "avg_hi_pct": float(hi["pct"].mean()), "avg_lo_pct": float(lo["pct"].mean()),
-                               "avg_score_spread": float(spread.mean()), "skip_threshold": float(thr),
+                               "long_leg_mean": fl(a[(a.index >= a0) & (a.index <= a1)].mean()),
+                               "short_leg_mean": fl(b[(b.index >= a0) & (b.index <= a1)].mean()),
+                               "avg_names_per_side": fl(hi[(hi.date_var >= a0) & (hi.date_var <= a1)].groupby("date_var").size().mean()),
+                               "avg_hi_pct": fl(hi["pct"].mean()), "avg_lo_pct": fl(lo["pct"].mean()),
+                               "avg_score_spread": fl(spread.mean()), "skip_threshold": fl(thr),
                                "cost_drag_vs_mid": np.nan})
                     rows.append(st)
     tab = pd.DataFrame(rows)

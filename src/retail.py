@@ -194,7 +194,9 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
                         missing += 1
                         intr = (max(Sx - row["strike"], 0) if row["cp"] == "C" else max(row["strike"] - Sx, 0)) \
                             if np.isfinite(Sx) else np.nan
-                        b = a = intr
+                        # unquoted on the exit snapshot (2025+ feed omits unquoted expiring series):
+                        # value at intrinsic with a one-tick market around it
+                        b, a = max(intr - 0.01, 0.0), intr + 0.01
                     else:
                         b, a = float(q["bid"]), float(q["ask"])
                     exit_vals[row["symbol"]] = (b, a, s)

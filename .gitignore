@@ -1,0 +1,9 @@
+secrets/
+*.key
+.env
+__pycache__/
+*.pyc
+data/raw/
+data/cache/
+*.dbn
+*.dbn.zst

@@ -200,6 +200,7 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
     o["wp_bid"] = w * o["best_bid"]
     o["wp_ask"] = w * o["best_offer"]
     o["wdelta"] = w * o["delta"]
+    o["wtick"] = w * np.where(o["Mid_quote"] < 3, 0.01, 0.05)  # COST4: one tick per option
 
     # ---- strike interval (corridor) info
     si = o.groupby("root").agg(strike_min=("strike_price", "min"), strike_max=("strike_price", "max"),
@@ -217,6 +218,7 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
 
     fm = o.groupby("root").agg(ticker=("ticker", "first"), sigma2=("wp", "sum"), sigma2_bid=("wp_bid", "sum"),
                                sigma2_ask=("wp_ask", "sum"), Initial_delta=("wdelta", "sum"),
+                               sigma2_tick=("wtick", "sum"),
                                Forward=("Forward", "first"), K0=("K0", "first"), K1=("K1", "first"),
                                days_expire=("days_expire", "first"), linear_rate=("linear_rate", "first"),
                                St_start=("St_start", "first"), St_end=("St_end", "first"),
@@ -258,12 +260,23 @@ def build_firm_months(date: dt.date, chain: pd.DataFrame, stk: "StockData", rate
         (1 + daily["ret"] - Rf_daily ** gap) * Rf_daily ** tt
     daily["DHC_Theory"] = 2 * (daily["Forward_daily"] / daily["FDC"]) * (daily["FDC"] / lagFDC - 1)
     daily["ret2"] = daily["ret"] ** 2
+    Amap = A.reindex(fm.index)
+    stat = Amap - 2 / (fm.St_start * fm.Rf)
+    daily["n_sh"] = daily["root"].map(stat) + 2 / daily["FDC"]
+    n_prev = daily["root"].map(stat) + 2 / lagFDC
+    daily["dn_dollar"] = (daily["n_sh"] - n_prev).abs() * daily["close"]
+    first_row = daily["date"] == date_ts
+    daily.loc[first_row, "dn_dollar"] = (daily.loc[first_row, "n_sh"]).abs() * daily.loc[first_row, "close"]
+    lastd = daily.groupby("root")["date"].transform("max") == daily["date"]
+    daily["close_out"] = np.where(lastd, daily["n_sh"].abs() * daily["close"], 0.0)
+    to = daily.groupby("root").agg(hedge_turnover=("dn_dollar", "sum"), hedge_close=("close_out", "sum"))
     daily = daily[daily["date"] != date_ts]  # SAS: if date_daily=date then delete
     hp = daily.groupby("root").agg(Delta_Hedge_payoff_Corridor=("Delta_Hedge_Corridor", "sum"),
                                    Delta_Hedge_payoff=("Delta_Hedge_Reinvt", "sum"),
                                    Delta_Hedge_Corridor_Theory=("DHC_Theory", "sum"),
                                    Monthly_RV=("ret2", "sum"), n_days=("date", "size"))
-    fm = fm.join(hp)
+    fm = fm.join(hp).join(to)
+    fm["hedge_turnover"] = fm["hedge_turnover"] + fm["hedge_close"]  # $ stock traded per unit of VIX portfolio
     fm["Dynamic_VIX_Payoff_Corridor"] = fm.Static_VIX_Payoff - 2 * (fm.St_end / fm.St_start / fm.Rf - 1) + \
         fm.Delta_Hedge_payoff_Corridor
     fm["Dynamic_VIX_Return_Corridor"] = fm.Dynamic_VIX_Payoff_Corridor / fm.VIX_Prc - 1

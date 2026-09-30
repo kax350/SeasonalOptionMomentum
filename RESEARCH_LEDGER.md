@@ -50,6 +50,8 @@ Reported diagnostics: percentile of selected names, score spread (mean top − m
 * **P** = paper full eligible universe (holding sample rules).
 * **L** (liquid-options universe) = P ∩ {St_start ≥ $20} ∩ {K0 put and K1 call: bid > 0 and (ask−bid)/mid ≤ 10% at the 15:59 snapshot} ∩ {≥ 8 OTM strikes with bid > 0} ∩ {top 500 by 20-day average dollar volume (close×volume) among eligible stocks}.
 * **L-tight** (kill test 19): same but spread ≤ 5% and top 250 by dollar volume.
+* **L$** (added 2026-09-30 21:45 UTC, before any retail result was computed): L ∩ {structure's natural max loss per unit + commissions ≤ per-position budget (risk budget / 2K, capped at $500)} — i.e. extremes are picked among names the account can actually trade. Evaluated alongside L in DEVELOPMENT under the same A11 hierarchy.
+* Retail liquidity screens use the **entry snapshot (15:45)** and the previous session's close for price/ADV (clarification: point-in-time for a 15:45 decision; the 15:59 version is used for paper-level VIX-portfolio tests).
 
 ### A6. Retail instruments (next-month standard expiration, same as paper)
 Strikes chosen from quotes at entry: ATM = listed strike minimising |K − Forward|; Δ-targets use Black-Scholes delta from mid IV at entry, strike with delta closest to target.
@@ -90,6 +92,7 @@ Strikes chosen from quotes at entry: ATM = listed strike minimising |K − Forwa
 4. ≥ 2 long + ≥ 2 short positions preferred to 1+1 → K = 3 if total contracts ≤ 24 and budget allows, else K = 2, else K = 1.
 5. ≤ 24 option contracts total.
 6. Hedge policy per A7 (no intraday hedging ever).
+   Search order (clarified before results): K = 3, then 2, then 1; within each K try budget 4% then 8%; the first (K, budget) with ≥ 1 feasible configuration is used. A month is "executable" if ≥ min(K,2) long and ≥ min(K,2) short positions get qty ≥ 1 (K = 1: 1+1).
 7. Among structures surviving 1–6: highest DEVELOPMENT after-cost Sharpe (combo mid + 50% spread, $0.70/contract); ties → fewer legs. PAIR1 vs PAIR2 and EQUAL vs VEGA are chosen by the same rule.
 Everything is then frozen for HOLDOUT/EXTERNAL.
 

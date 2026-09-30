@@ -13,7 +13,7 @@ DATA = os.environ.get("SOM_DATA", "/home/user/data")
 OUT = os.path.join(DATA, "panel")
 KEEP = ["root", "ticker", "date", "exdate", "exdate_trade", "days_expire", "St_start", "St_end", "Forward", "K0", "K1",
         "strike_min", "strike_max", "delta_min", "delta_max", "num_put", "num_call", "num_strikes", "sigma2", "sigma2_bid",
-        "sigma2_ask", "VIX_Prc", "VIX_Prc_bid", "VIX_Prc_ask", "VIX_BA_percent", "Initial_delta", "IV_avg", "Rf", "rf",
+        "sigma2_ask", "sigma2_tick", "hedge_turnover", "VIX_Prc", "VIX_Prc_bid", "VIX_Prc_ask", "VIX_BA_percent", "Initial_delta", "IV_avg", "Rf", "rf",
         "linear_rate", "Static_VIX_Payoff", "Static_VIX_Return", "Delta_Hedge_payoff_Corridor",
         "Dynamic_VIX_Payoff_Corridor", "Dynamic_VIX_Return_Corridor", "Dynamic_VIX_Return", "Monthly_RV", "VSR",
         "RV_Corridor", "VSR_Corridor", "n_days", "n_opt", "sample"]

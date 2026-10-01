@@ -1,0 +1,15 @@
+{
+ "ridge_coefs_DISC": {
+  "const": -0.03418,
+  "pct_z": 0.01062,
+  "FRONT_atm_rel_spread_z": -0.0418,
+  "lspot_z": 0.00147,
+  "ladv_z": -0.01112,
+  "ivhv_z": 0.02068,
+  "term_slope_z": 0.02269,
+  "FRONT_skew25_z": 0.00338,
+  "liv_z": 0.00667,
+  "pct_x_spread": 0.01593,
+  "pct_x_liv": 0.01031
+ }
+}

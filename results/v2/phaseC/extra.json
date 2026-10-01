@@ -1,0 +1,22 @@
+{
+ "drops": {
+  "CAL": {
+   "units": 49729,
+   "drop_L": 82,
+   "drop_S": 82,
+   "dead_long": 0
+  },
+  "CAL11": {
+   "units": 49729,
+   "drop_L": 82,
+   "drop_S": 82,
+   "dead_long": 0
+  },
+  "DIAG": {
+   "units": 37072,
+   "drop_L": 58,
+   "drop_S": 58,
+   "dead_long": 0
+  }
+ }
+}

@@ -1,0 +1,16 @@
+{
+ "drops": {
+  "STR_F": {
+   "units": 74443,
+   "drop_L": 0,
+   "drop_S": 68,
+   "dead_long": 68
+  },
+  "STR_B": {
+   "units": 50391,
+   "drop_L": 19,
+   "drop_S": 82,
+   "dead_long": 63
+  }
+ }
+}

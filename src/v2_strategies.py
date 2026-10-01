@@ -298,12 +298,17 @@ def record(rows, series, fam, pol, lv, df):
     rows.append(row)
 
 
+FIXED_HEDGE = {"D2_slope_S_ew": "H1", "D2_slope_S_adv": "H1"}   # charter §6 Phase D: D2 is defined on H1 returns
+
+
 def family_verdicts(tab):
     """Per family: hedge policy chosen in DISCOVERY at C50 by NW t (charter §6B), verdict at C50, plus MID/GROSS
-    reference and the cost share of gross edge."""
+    reference and the cost share of gross edge. Families whose hedge the charter fixes use that hedge."""
     out = []
     for fam, g in tab.groupby("family", sort=False):
         c50 = g[(g["cost"] == "C50") & g["DISC_t"].notna()]
+        if fam in FIXED_HEDGE:
+            c50 = c50[c50["hedge"] == FIXED_HEDGE[fam]]
         if c50.empty:
             out.append({"family": fam, "verdict": "FAIL", "note": "no C50 DISC series"})
             continue

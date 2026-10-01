@@ -208,8 +208,15 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
                         intr = (max(Sx - row["strike"], 0) if row["cp"] == "C" else max(row["strike"] - Sx, 0)) \
                             if np.isfinite(Sx) else np.nan
                         # unquoted on the exit snapshot (2025+ feed omits unquoted expiring series):
-                        # value at intrinsic with a one-tick market around it
-                        b, a = max(intr - 0.01, 0.0), intr + 0.01
+                        # conservative synthetic market around intrinsic: ITM half-spread max($0.05, 1% of
+                        # intrinsic); OTM 0 bid / $0.05 ask (buying back a short wing costs a full tick)
+                        if not np.isfinite(intr):
+                            b = a = np.nan
+                        elif intr > 0:
+                            h = max(0.05, 0.01 * intr)
+                            b, a = max(intr - h, 0.0), intr + h
+                        else:
+                            b, a = 0.0, 0.05
                     else:
                         b, a = float(q["bid"]), float(q["ask"])
                     exit_vals[row["symbol"]] = (b, a, s)

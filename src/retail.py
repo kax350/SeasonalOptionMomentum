@@ -153,7 +153,7 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
     r = float(rates.linear_rate(pd.Timestamp(F_date), [(pd.Timestamp(exdate_trade) - pd.Timestamp(F_date)).days])[0]) / 100
     if names is not None:
         ch = ch[ch["root"].isin(set(names))]
-    exq = chx.set_index("symbol")[["bid", "ask"]]
+    exq = chx.groupby("symbol")[["bid", "ask"]].first()   # de-duplicate symbols on the exit snapshot
     # implied spot at exit from the new next-month chain (15:00 on X)
     rows = []
     for root, g in ch.groupby("root"):

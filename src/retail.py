@@ -156,7 +156,9 @@ def evaluate_month(F_date: dt.date, X_date: dt.date, entry_when: str, rates: Rat
         dlt, gam, veg, the = _bs(S0, g["strike"].values, T_entry, r, ivf, g["cp"].values)
         g["delta"], g["gamma"], g["vega"], g["theta"] = dlt, gam, veg, the
         g.loc[g["iv"].isna(), "delta"] = np.nan
-        Sx = spot_x.get(root, np.nan) * np.exp(-r * 28 / 365)   # next-month forward at X 15:00 -> spot
+        _sx = spot_x.get(root)
+        _sx = float(_sx) if _sx is not None and pd.notna(_sx) else np.nan
+        Sx = _sx * np.exp(-r * 28 / 365)   # next-month forward at X 15:00 -> spot
         path = px_daily.get(root) if px_daily is not None else None
         for kind in (kinds_by_root.get(root, KINDS) if kinds_by_root else KINDS):
             for side in (1, -1):

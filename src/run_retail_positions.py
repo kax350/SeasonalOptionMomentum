@@ -91,42 +91,58 @@ def main(entry_when="1545", start="2019-06", end="2026-08", workers=3):
     os.makedirs(OUTD, exist_ok=True)
     fds = formation_dates(start, pd.Period(end, "M") + 1)
     pairs = list(zip(fds[:-1], fds[1:]))
-    stk = StockData()
-    px = stk.px.copy()
+    uni_path = os.path.join(OUTD, f"universe_{entry_when}.parquet")
+    px = pd.read_parquet(os.path.join(DATA, "stocks", "ohlcv.parquet"), columns=["date", "act_symbol", "close"])
+    px["date"] = pd.to_datetime(px["date"])
+    px = px[px["date"] >= pd.Timestamp(start) - pd.Timedelta(days=400)]
+    px["close"] = px["close"].astype("float64")
     px["root"] = normalize_root(px["act_symbol"].astype(str))
-    sc = score_grid([F for F, _ in pairs], [X for _, X in pairs])
-    sort_panel = pd.read_parquet(os.path.join(DATA, "panel", "vix_sort.parquet"))
-    unis, jobs = [], []
+    if os.path.exists(uni_path):
+        uni = pd.read_parquet(uni_path)
+        print("loaded cached universe", uni["F"].nunique(), "months", flush=True)
+    else:
+        stk = StockData()
+        pxs = stk.px.copy()
+        pxs["root"] = normalize_root(pxs["act_symbol"].astype(str))
+        sc = score_grid([F for F, _ in pairs], [X for _, X in pairs])
+        sort_panel = pd.read_parquet(os.path.join(DATA, "panel", "vix_sort.parquet"))
+        unis = []
+        for F, X in pairs:
+            if not os.path.exists(os.path.join(DATA, "opra", "snap_1500", f"{X}.parquet")):
+                print("no exit snapshot yet", X, flush=True); continue
+            u = month_universe(F, X, stk, sc[sc["F"] == pd.Timestamp(F)], entry_when, pxs)
+            if u is None:
+                print("no entry snapshot", F, flush=True); continue
+            u["hv_iv"] = hv_iv(u, pxs, F, sort_panel[sort_panel["date"] == pd.Timestamp(F)])
+            unis.append(u)
+        uni = pd.concat(unis, ignore_index=True)
+        uni.to_parquet(uni_path, index=False)
+        del stk, pxs
+    jobs = []
     for F, X in pairs:
-        if not os.path.exists(os.path.join(DATA, "opra", "snap_1500", f"{X}.parquet")):
-            print("no exit snapshot yet", X, flush=True); continue
-        u = month_universe(F, X, stk, sc[sc["F"] == pd.Timestamp(F)], entry_when, px)
-        if u is None:
-            print("no entry snapshot", F, flush=True); continue
-        pc = sort_panel[sort_panel["date"] == pd.Timestamp(F)]
-        u["hv_iv"] = hv_iv(u, px, F, pc)
-        unis.append(u)
+        u = uni[uni["F"] == pd.Timestamp(F)]
+        if u.empty:
+            continue
         P = u[u["eligible_P"]]
-        cand = set(u.loc[u["L"], "root"])
+        cand = set(u.loc[u["L"], "root"]) | set(u.loc[u["Ltight"], "root"])
         for col in ("seasonal", "mom_2_12", "hv_iv"):
             z = P[P[col].notna()].sort_values(col)
             cand |= set(z["root"].head(TOPN)) | set(z["root"].tail(TOPN))
-        cand |= set(u.loc[u["Ltight"], "root"])
         win = px[(px["date"] >= pd.Timestamp(F)) & (px["date"] <= pd.Timestamp(X)) & px["root"].isin(cand)]
         paths = {r: g.set_index("date")["close"].sort_index() for r, g in win.groupby("root")}
         jobs.append((F, X, entry_when, sorted(cand), paths))
-    pd.concat(unis, ignore_index=True).to_parquet(os.path.join(OUTD, f"universe_{entry_when}.parquet"), index=False)
-    print("universe months", len(unis), flush=True)
-    del stk
+    del px
+    print("jobs", len(jobs), "avg names", np.mean([len(j[3]) for j in jobs]), flush=True)
+    import multiprocessing as mp
     outs = []
-    with Pool(workers) as pool:
+    with mp.get_context("spawn").Pool(workers) as pool:   # spawn: workers do not inherit parent memory
         for F, df, secs in pool.imap_unordered(_work, jobs):
             print(F, "positions", len(df), f"{secs:.0f}s", flush=True)
             if len(df):
                 outs.append(df)
     pos = pd.concat(outs, ignore_index=True)
     pos.to_parquet(os.path.join(OUTD, f"positions_{entry_when}.parquet"), index=False)
-    print("positions", pos.shape)
+    print("positions", pos.shape, flush=True)
 
 
 if __name__ == "__main__":

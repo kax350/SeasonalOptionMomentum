@@ -1,19 +1,23 @@
-"""RETAIL V2 — Phase A: liquid universe + signal decomposition (Q1) + mid-artifact tests (Q2).
-Charter §6 Phase A. DISCOVERY = holding months 2014-02 … 2020-12 (verdict); 2021-2026 reported only.
+"""RETAIL V2 — Phase A: signal decomposition (Q1) and mid-artifact tests (Q2). Charter §6 Phase A, ledger row 2.
+
+Universes
+  P   = paper panel rows with a holding-sample return (vix_posoi), signals from past returns.
+  LOU = V2 liquid option universe at F (FRONT screens), signal re-ranked inside LOU.
+Windows: DISC = exit months 2014-02 … 2020-12 (verdict); VAL = 2021-01 … 2023-12 (reported). FORWARD hidden.
+Verdict A: NW(3) t of the monthly paired difference [Q5−Q1 of S0] − [Q5−Q1 of NonQ] on vix_posoi inside LOU, DISC.
 """
-import os, sys, json, glob
+import os, sys, json
 import numpy as np, pandas as pd
 sys.path.insert(0, os.path.dirname(__file__))
 from paper_core import month_index, newey_west_t, sas_rank_groups
+import v2_universe
+import v2_strategies as vs
 
 DATA = os.environ.get("SOM_DATA", "/home/user/data")
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 OUT = os.path.join(ROOT, "results", "v2", "phaseA")
-DISC = ("2014-01-01", "2020-12-31")
-LATE = ("2021-01-01", "2026-12-31")
-LAGS = {"S0": ((3, 6, 9, 12), 3, "vix_all"), "S1": ((3, 6, 9, 12), 3, "vix_posoi"),
-        "NonQ": ((1, 2, 4, 5, 7, 8, 10, 11), 6, "vix_all"), "S0p2": ((2, 5, 8, 11), 3, "vix_all"),
-        "Mom": (tuple(range(2, 13)), 8, "vix_all"), "Lag1": ((1,), 1, "vix_all")}
+WINS = {"DISC": ("2014-02-01", "2020-12-31"), "VAL": ("2021-01-01", "2023-12-31")}
+END = pd.Timestamp("2023-12-31")
 
 
 def load_panel():
@@ -22,181 +26,184 @@ def load_panel():
     s["vix_all"] = s["Dynamic_VIX_Return_Corridor"] - s["rf"]
     h["vix_posoi"] = h["Dynamic_VIX_Return_Corridor"] - h["rf"]
     keep = ["root", "exdate_trade", "vix_posoi", "VIX_Prc", "VIX_Prc_bid", "VIX_Prc_ask", "RV_Corridor",
-            "VIX_BA_percent", "St_start", "IV_avg"]
-    p = s[["root", "ticker", "date", "exdate_trade", "vix_all"]].merge(h[keep], on=["root", "exdate_trade"], how="left")
+            "VIX_BA_percent", "IV_avg"]
+    p = s[["root", "date", "exdate_trade", "vix_all"]].merge(h[keep], on=["root", "exdate_trade"], how="left")
     p = p.rename(columns={"exdate_trade": "X", "date": "F"})
     p["m"] = month_index(p["X"])
     for c in p.columns:
         if str(p[c].dtype) in ("Float64", "Int64"):
             p[c] = p[c].astype("float64")
-    return p
-
-
-def add_signals(p):
-    for name, (lags, need, var) in LAGS.items():
-        base = p.dropna(subset=[var]).drop_duplicates(["root", "m"]).set_index(["root", "m"])[var]
-        V = np.vstack([base.reindex(pd.MultiIndex.from_arrays([p["root"].values, (p["m"] - L).values])).values
+    base = p.dropna(subset=["vix_all"]).drop_duplicates(["root", "m"]).set_index(["root", "m"])["vix_all"]
+    hb = h.assign(m=month_index(h["exdate_trade"]))
+    hbase = hb.dropna(subset=["vix_posoi"]).drop_duplicates(["root", "m"]).set_index(["root", "m"])["vix_posoi"].astype("float64")
+    for name, (lags, need, src) in v2_universe.LAGS.items():
+        b = base if src == "sort" else hbase
+        V = np.vstack([b.reindex(pd.MultiIndex.from_arrays([p["root"].values, (p["m"] - L).values])).values
                        for L in lags]).T
         n = (~np.isnan(V)).sum(1)
         with np.errstate(invalid="ignore"):
             p[name] = np.where(n >= need, np.nanmean(V, axis=1), np.nan)
-    return p
+    return p, base
 
 
-def add_v2(p):
-    """LOU flags and V2 root features (FRONT/BACK ATM IV, spreads, skew) + DoltHub outcomes."""
-    R = pd.concat([pd.read_parquet(f) for f in sorted(glob.glob(os.path.join(DATA, "v2", "roots", "*.parquet")))],
-                  ignore_index=True)
-    D = pd.read_parquet(os.path.join(DATA, "v2", "root_features_dolthub.parquet"))
-    R = R.merge(D, on=["root", "F", "X"], how="left")
-    R = R[~R["is_etf"]]
-    q = (R["S0"] >= 20) & R["FRONT_atm_bid_ok"].fillna(False) & R["BACK_atm_bid_ok"].fillna(False)
-    for name, sp, top in (("LOU", 0.10, 500), ("LOU_tight", 0.05, 250), ("LOU_loose", 0.20, 1000)):
-        ok = q & (R["FRONT_atm_rel_spread"] <= sp) & (R["BACK_atm_rel_spread"] <= sp)
-        if name == "LOU_loose":
-            ok = ((R["S0"] >= 10) & R["FRONT_atm_bid_ok"].fillna(False) & R["BACK_atm_bid_ok"].fillna(False)
-                  & (R["FRONT_atm_rel_spread"] <= sp) & (R["BACK_atm_rel_spread"] <= sp))
-        rk = R["adv20"].where(ok).groupby(R["F"]).rank(ascending=False)
-        R[name] = ok & (rk <= top)
-    R["term_slope"] = R["BACK_atm_iv"] - R["FRONT_atm_iv"]
-    R = R.sort_values(["root", "F"])
-    R["skew_next"] = R.groupby("root")["FRONT_skew25"].shift(-1)
-    R["iv_next"] = R.groupby("root")["FRONT_atm_iv"].shift(-1)
-    cols = ["root", "F", "X", "LOU", "LOU_tight", "LOU_loose", "S0", "FRONT_atm_iv", "BACK_atm_iv", "FRONT_atm_rel_spread",
-            "BACK_atm_rel_spread", "FRONT_skew25", "skew_next", "iv_next", "term_slope", "adv20", "hv21", "hv252", "beta",
-            "rv", "rv_idio", "jump_share", "FRONT_atm_min_size"]
-    R = R[cols].rename(columns={"S0": "spot_F"})
-    return p.merge(R, on=["root", "F", "X"], how="left")
+def window_stats(s):
+    s = pd.Series(s).dropna().sort_index()
+    out = {}
+    for w, (a, b) in WINS.items():
+        x = s[(s.index >= a) & (s.index <= b)]
+        if len(x) >= 3:
+            out[w] = {"mean": float(x.mean()), "t": float(newey_west_t(x)), "n": int(len(x))}
+    return out
 
 
-def fm(df, y, xs, by="X", min_n=30):
+def fm(df, y, xs, min_n=30):
     rows = []
-    for d, g in df.dropna(subset=[y] + xs).groupby(by):
+    for d, g in df.dropna(subset=[y] + xs).groupby("X"):
         if len(g) < min_n:
             continue
-        X = np.column_stack([np.ones(len(g))] + [g[x].values for x in xs])
+        A = np.column_stack([np.ones(len(g))] + [g[x].values for x in xs])
         yy = g[y].values
         lo, hi = np.nanquantile(yy, [0.01, 0.99])
-        b = np.linalg.lstsq(X, np.clip(yy, lo, hi), rcond=None)[0]
+        b = np.linalg.lstsq(A, np.clip(yy, lo, hi), rcond=None)[0]
         rows.append([d] + list(b[1:]))
     if not rows:
         return {}
-    r = pd.DataFrame(rows, columns=[by] + xs).set_index(by)
-    out = {}
-    for per, (a, b) in (("disc", DISC), ("late", LATE)):
-        z = r[(r.index >= a) & (r.index <= b)]
-        out[per] = {x: {"slope": float(z[x].mean()), "t": float(newey_west_t(z[x])), "n": int(len(z))} for x in xs}
-    return out
+    r = pd.DataFrame(rows, columns=["X"] + xs).set_index("X")
+    return {x: window_stats(r[x]) for x in xs}
 
 
-def ranks(df, col, mask=None, by="X"):
-    g = df[col].where(mask) if mask is not None else df[col]
-    return g.groupby(df[by]).rank(pct=True) - 0.5
+def crank(df, col, by=("X",)):
+    return df.groupby(list(by))[col].rank(pct=True) - 0.5
+
+
+def hl_series(df, sig, ret, ng=5, min_per_group=3):
+    ser = {}
+    for d, g in df.dropna(subset=[sig, ret]).groupby("X"):
+        if len(g) < min_per_group * ng:
+            continue
+        q = sas_rank_groups(g[sig], ng)
+        ser[d] = g[ret][q == ng].mean() - g[ret][q == 1].mean()
+    return pd.Series(ser, dtype=float).sort_index()
 
 
 def hl_by_bucket(df, sig, ret, bucket, ng=5):
-    """Within each month and bucket, re-rank `sig` into ng groups; H-L of `ret`. Returns per-bucket stats."""
-    out = {}
-    for b, gb in df.dropna(subset=[sig, ret, bucket]).groupby(bucket):
-        ser = []
-        for d, g in gb.groupby("X"):
-            if len(g) < 3 * ng:
-                continue
-            q = sas_rank_groups(g[sig], ng)
-            ser.append((d, g[ret][q == ng].mean() - g[ret][q == 1].mean()))
-        s = pd.Series(dict(ser)).sort_index()
-        out[str(b)] = {per: {"mean": float(s[(s.index >= a) & (s.index <= bb)].mean()),
-                             "t": float(newey_west_t(s[(s.index >= a) & (s.index <= bb)])),
-                             "n": int(((s.index >= a) & (s.index <= bb)).sum())}
-                       for per, (a, bb) in (("disc", DISC), ("late", LATE))}
-    return out
+    return {str(b): window_stats(hl_series(g, sig, ret, ng)) for b, g in df.dropna(subset=[bucket]).groupby(bucket)}
 
 
 def main():
     os.makedirs(OUT, exist_ok=True)
-    p = add_signals(load_panel())
-    p = add_v2(p)
-    # C50 executable returns from the cost audit (paper construction)
+    U = v2_universe.load()
+    U = U[(U["X"] <= END) & ~U["is_etf"].astype(bool)].copy()
+    p, base = load_panel()
+    p = p[(p["X"] >= "2014-01-01") & (p["X"] <= END)]
+    # V2 straddle outcomes (FRONT ATM straddle per $ premium): GROSS delta-hedged daily, and C50 H1 net
+    keys = U[U["LOU_loose"]]
+    bk = vs.Book(vs.load_legs(keys), vs.load_roots())
+    for nm, lv, pol in (("str_gross_H2", "GROSS", "H2"), ("str_gross_H0", "GROSS", "H0"), ("str_C50_H1", "C50", "H1")):
+        v = bk.get("STR_F", vs.STRADDLE("FRONT"), lv, pol)
+        v = v.assign(**{nm: v["L_tot"] / v["prem_L"]})[["F", "X", "root", nm]]
+        U = U.merge(v, on=["F", "X", "root"], how="left")
     fc = pd.read_parquet(os.path.join(DATA, "derived", "firm_month_costs.parquet"),
-                         columns=["id", "date_var", "rL_COST2_e50", "rS_COST2_e50", "rL_COST0_mid"])
-    fc = fc.rename(columns={"id": "root", "date_var": "X"})
-    p = p.merge(fc, on=["root", "X"], how="left")
-    p = p[p["X"] >= "2014-01-01"]
-    p["logRVc"] = np.log(p["RV_Corridor"].clip(lower=1e-8))
-    p["logIVc"] = np.log(p["VIX_Prc"])
-    p["VRP"] = p["logRVc"] - p["logIVc"]
-    p["log_rv"] = np.log(p["rv"].clip(lower=1e-8))
-    p["log_rv_idio"] = np.log(p["rv_idio"].clip(lower=1e-8))
-    p["idio_share"] = p["rv_idio"] / p["rv"]
-    p["d_skew"] = p["skew_next"] - p["FRONT_skew25"]
-    p["d_iv"] = p["iv_next"] - p["FRONT_atm_iv"]
-    p["mid_bias"] = (p["VIX_Prc"] - p["VIX_Prc_bid"]) / p["VIX_Prc"]
-    res = {}
+                         columns=["id", "date_var", "rL_COST2_e50", "rS_COST2_e50"]).rename(columns={"id": "root", "date_var": "X"})
+    ucols = ["root", "F", "X", "LOU", "LOU_B", "back_listed", "FRONT_atm_iv", "FRONT_atm_rel_spread", "FRONT_skew25",
+             "skew_next", "iv_next", "rv", "rv_idio", "jump_share", "beta", "str_gross_H2", "str_gross_H0", "str_C50_H1"]
+    P = p.merge(U[ucols].drop(columns=["F"]), on=["root", "X"], how="left").merge(fc, on=["root", "X"], how="left")
+    # LOU frame: all LOU names, panel outcomes where available (signals from the universe grid)
+    D = U[U["LOU"]].merge(p[["root", "X", "vix_posoi", "VIX_Prc", "VIX_Prc_bid", "RV_Corridor", "VIX_BA_percent"]],
+                          on=["root", "X"], how="left")
+    for d in (P, D):
+        d["logRVc"] = np.log(d["RV_Corridor"].clip(lower=1e-8))
+        d["logIVc"] = np.log(d["VIX_Prc"])
+        d["VRP"] = d["logRVc"] - d["logIVc"]
+        d["log_rv"] = np.log(d["rv"].clip(lower=1e-8))
+        d["log_rv_idio"] = np.log(d["rv_idio"].clip(lower=1e-8))
+        d["log_rv_sys"] = np.log((d["rv"] - d["rv_idio"]).clip(lower=1e-8))
+        d["idio_share"] = d["rv_idio"] / d["rv"]
+        d["log_atm_iv"] = np.log(d["FRONT_atm_iv"])
+        d["VRP_atm"] = d["log_rv"] - np.log(d["FRONT_atm_iv"] ** 2 * (d["X"] - d["F"]).dt.days / 365)
+        d["d_skew"] = d["skew_next"] - d["FRONT_skew25"]
+        d["d_iv"] = d["iv_next"] - d["FRONT_atm_iv"]
+        d["mid_bias"] = (d["VIX_Prc"] - d["VIX_Prc_bid"]) / d["VIX_Prc"]
+    res = {"counts": {
+        "P_rows_DISC": int(((P["X"] >= WINS["DISC"][0]) & (P["X"] <= WINS["DISC"][1]) & P["vix_posoi"].notna()).sum()),
+        "LOU_per_month_median": float(D.groupby("X").size().median()),
+        "LOU_with_S0_per_month_median": float(D[D["S0"].notna()].groupby("X").size().median()),
+        "LOU_B_per_month_median": float(U[U["LOU_B"]].groupby("X").size().median()),
+        "LOU_with_vix_posoi_share": float(D["vix_posoi"].notna().mean())}}
     # ---------------- A1 decomposition ----------------
-    outcomes = ["vix_posoi", "rL_COST2_e50", "logRVc", "logIVc", "VRP", "log_rv", "log_rv_idio", "idio_share",
-                "jump_share", "FRONT_atm_iv", "d_iv", "FRONT_skew25", "d_skew", "VIX_BA_percent", "mid_bias"]
-    hold = p["vix_posoi"].notna()
-    for uni, mask in (("P", hold), ("LOU", hold & p["LOU"].fillna(False))):
-        d = p[mask].copy()
-        d["r_S0"] = ranks(d, "S0")
-        d["r_Mom"] = ranks(d, "Mom")
-        d["r_Lag1"] = ranks(d, "Lag1")
-        res[f"A1_{uni}"] = {y: fm(d, y, ["r_S0"]) for y in outcomes}
-        res[f"A1_{uni}_controls"] = {y: fm(d, y, ["r_S0", "r_Mom", "r_Lag1"]) for y in ["vix_posoi", "VRP", "log_rv", "log_rv_idio"]}
+    outcomes = ["vix_posoi", "rL_COST2_e50", "str_gross_H2", "str_gross_H0", "str_C50_H1", "logRVc", "logIVc", "VRP",
+                "log_rv", "log_rv_idio", "log_rv_sys", "idio_share", "jump_share", "log_atm_iv", "VRP_atm", "d_iv",
+                "FRONT_skew25", "d_skew", "VIX_BA_percent", "FRONT_atm_rel_spread", "mid_bias"]
+    Ph = P[P["vix_posoi"].notna()].copy()
+    for uni, d in (("P", Ph), ("LOU", D.copy())):
+        for c in ("S0", "Mom", "Lag1"):
+            d[f"r_{c}"] = crank(d, c)
+        res[f"A1_{uni}"] = {y: fm(d, y, ["r_S0"]) for y in outcomes if y in d}
+        res[f"A1_{uni}_controls"] = {y: fm(d, y, ["r_S0", "r_Mom", "r_Lag1"])
+                                     for y in ["vix_posoi", "str_gross_H2", "VRP", "log_rv", "log_rv_idio", "log_atm_iv"] if y in d}
     # ---------------- A2 mid-artifact ----------------
-    d = p[hold].copy()
-    d["liq_terc"] = d.groupby("X")["VIX_BA_percent"].transform(lambda x: pd.qcut(x.rank(method="first"), 3, labels=["liq", "mid", "illiq"]))
+    d = Ph
+    d["spr"] = d["FRONT_atm_rel_spread"].fillna(np.inf)            # not in V2 roots => failed the 25% screen
+    d["liq_terc"] = d.groupby("X")["spr"].transform(
+        lambda x: pd.qcut(x.rank(method="first"), 3, labels=["liq", "mid", "illiq"])).astype(str)
     res["A2i_double_sort_MID"] = hl_by_bucket(d, "S0", "vix_posoi", "liq_terc")
-    res["A2i_double_sort_C50_longleg_Q5minusQ1_longs"] = hl_by_bucket(d, "S0", "rL_COST2_e50", "liq_terc")
-    # executable H-L at C50 per tercile: long Q5 at C50 buy, short Q1 at C50 sell
     out = {}
     for b, gb in d.dropna(subset=["S0", "rL_COST2_e50", "rS_COST2_e50"]).groupby("liq_terc"):
-        ser = []
+        ser = {}
         for dd, g in gb.groupby("X"):
             if len(g) < 15:
                 continue
             q = sas_rank_groups(g["S0"], 5)
-            ser.append((dd, g["rL_COST2_e50"][q == 5].mean() - g["rS_COST2_e50"][q == 1].mean()))
-        s = pd.Series(dict(ser)).sort_index()
-        out[str(b)] = {per: {"mean": float(s[(s.index >= a) & (s.index <= bb)].mean()),
-                             "t": float(newey_west_t(s[(s.index >= a) & (s.index <= bb)]))}
-                       for per, (a, bb) in (("disc", DISC), ("late", LATE))}
-    res["A2i_double_sort_C50_executable"] = out
-    res["A2ii_NonQ_MID"] = hl_by_bucket(d, "NonQ", "vix_posoi", "liq_terc")
-    d["r_S0"] = d.groupby(["X", "liq_terc"])["S0"].rank(pct=True) - 0.5
-    d["r_NonQ"] = d.groupby(["X", "liq_terc"])["NonQ"].rank(pct=True) - 0.5
-    res["A2ii_FM_S0_vs_NonQ_by_tercile"] = {str(b): fm(g, "vix_posoi", ["r_S0", "r_NonQ"], min_n=20)
+            ser[dd] = g["rL_COST2_e50"][q == 5].mean() - g["rS_COST2_e50"][q == 1].mean()
+        out[str(b)] = window_stats(pd.Series(ser, dtype=float))
+    res["A2i_double_sort_C50_executable_paper_construction"] = out
+    res["A2i_tercile_median_spread"] = d.replace(np.inf, np.nan).groupby("liq_terc")["FRONT_atm_rel_spread"].median().to_dict()
+    res["A2i_tercile_share_missing_from_V2"] = d.groupby("liq_terc")["FRONT_atm_rel_spread"].apply(lambda x: float(x.isna().mean())).to_dict()
+    res["A2ii_NonQ_MID_by_tercile"] = hl_by_bucket(d, "NonQ", "vix_posoi", "liq_terc")
+    d["r_S0t"] = crank(d, "S0", ("X", "liq_terc")); d["r_NonQt"] = crank(d, "NonQ", ("X", "liq_terc"))
+    res["A2ii_FM_S0_vs_NonQ_by_tercile"] = {str(b): fm(g, "vix_posoi", ["r_S0t", "r_NonQt"], min_n=20)
                                            for b, g in d.groupby("liq_terc")}
-    dl = d[d["LOU"].fillna(False)].copy()
-    dl["r_S0"] = ranks(dl, "S0"); dl["r_NonQ"] = ranks(dl, "NonQ"); dl["r_S1"] = ranks(dl, "S1")
+    # inside LOU (re-ranked): S0, NonQ, S1 H-L and the paired difference (VERDICT A)
+    dl = D.copy()
+    for c in ("S0", "NonQ", "S1"):
+        dl[f"r_{c}"] = crank(dl, c)
     res["A2ii_FM_S0_vs_NonQ_LOU"] = fm(dl, "vix_posoi", ["r_S0", "r_NonQ"], min_n=20)
-    # quarterly-specific component inside LOU: H-L(S0) - H-L(NonQ), LOU re-ranked (Phase A verdict)
-    dl["all"] = "LOU"
-    a = hl_by_bucket(dl, "S0", "vix_posoi", "all")["LOU"]
-    b = hl_by_bucket(dl, "NonQ", "vix_posoi", "all")["LOU"]
-    res["A2ii_LOU_HL_S0_MID"], res["A2ii_LOU_HL_NonQ_MID"] = a, b
+    res["A2ii_FM_S0_vs_NonQ_LOU_straddle_gross_H2"] = fm(dl, "str_gross_H2", ["r_S0", "r_NonQ"], min_n=20)
+    verd = {}
+    for ret in ("vix_posoi", "str_gross_H2", "str_C50_H1"):
+        a, b = hl_series(dl, "S0", ret), hl_series(dl, "NonQ", ret)
+        j = pd.concat([a, b], axis=1, keys=["S0", "NonQ"]).dropna()
+        verd[ret] = {"HL_S0": window_stats(a), "HL_NonQ": window_stats(b), "paired_diff": window_stats(j["S0"] - j["NonQ"])}
+        if ret == "vix_posoi":
+            j.to_csv(os.path.join(OUT, "lou_hl_series.csv"))
+    res["A_verdict_inputs_LOU"] = verd
+    pd_ = verd["vix_posoi"]["paired_diff"].get("DISC", {})
+    res["VERDICT_A"] = ("PASS" if pd_.get("mean", -1) > 0 and pd_.get("t", 0) > 2 else
+                        "FAIL (seasonal-specific component not significant inside LOU: treat as mainly mid/liquidity artifact)")
     # (iii) S1 vs S0
     res["A2iii_S1_MID_by_tercile"] = hl_by_bucket(d, "S1", "vix_posoi", "liq_terc")
-    res["A2iii_LOU_HL_S1_MID"] = hl_by_bucket(dl, "S1", "vix_posoi", "all")["LOU"]
-    # (iv) persistence: FM slope of vix_posoi(m) on vix_all(m-L), L=1..12, by tercile
-    base = p.dropna(subset=["vix_all"]).drop_duplicates(["root", "m"]).set_index(["root", "m"])["vix_all"]
+    res["A2iii_S0_MID_LOU"] = window_stats(hl_series(dl, "S0", "vix_posoi"))
+    res["A2iii_S1_MID_LOU"] = window_stats(hl_series(dl, "S1", "vix_posoi"))
+    # (iv) persistence: FM slope of vix_posoi(m) on rank of vix_all(m-L), L = 1..12, by tercile
     pers = {}
     for L in range(1, 13):
         d[f"lag{L}"] = base.reindex(pd.MultiIndex.from_arrays([d["root"].values, (d["m"] - L).values])).values
-        d[f"r_lag{L}"] = d.groupby(["X", "liq_terc"])[f"lag{L}"].rank(pct=True) - 0.5
-        pers[L] = {str(b): fm(g, "vix_posoi", [f"r_lag{L}"], min_n=20) for b, g in d.groupby("liq_terc")}
+        d[f"r_lag{L}"] = crank(d, f"lag{L}", ("X", "liq_terc"))
+        pers[L] = {str(b): fm(g, "vix_posoi", [f"r_lag{L}"], min_n=20).get(f"r_lag{L}", {}) for b, g in d.groupby("liq_terc")}
     res["A2iv_persistence_by_lag"] = pers
-    # descriptive: where do Q1/Q5 names live
+    # (v) listing-cycle control: BACK monthly listed at F or not
+    res["A2v_listing_cycle_P"] = hl_by_bucket(d.assign(bl=d["back_listed"].map({True: "back_listed", False: "back_not_listed"})),
+                                              "S0", "vix_posoi", "bl")
+    res["A2v_listing_cycle_LOU"] = hl_by_bucket(dl.assign(bl=dl["back_listed"].map({True: "back_listed", False: "back_not_listed"})),
+                                                "S0", "vix_posoi", "bl")
+    # composition: where the paper's Q1/Q5 live
     d["q_full"] = d.groupby("X")["S0"].transform(lambda x: sas_rank_groups(x.dropna(), 5).reindex(x.index))
     res["composition"] = {
-        "share_in_LOU_by_full_quintile": d.groupby("q_full")["LOU"].mean().round(4).to_dict(),
-        "median_front_atm_spread_by_quintile": d.groupby("q_full")["FRONT_atm_rel_spread"].median().round(4).to_dict(),
-        "LOU_names_per_month_median": float(p[p["LOU"].fillna(False)].groupby("X").size().median()),
-        "LOU_with_S0_per_month_median": float(p[p["LOU"].fillna(False) & p["S0"].notna()].groupby("X").size().median()),
-    }
+        "share_in_LOU_by_full_quintile": d.groupby("q_full")["LOU"].apply(lambda x: float(x.fillna(False).mean())).to_dict(),
+        "median_front_atm_spread_by_quintile": d.replace(np.inf, np.nan).groupby("q_full")["FRONT_atm_rel_spread"].median().round(4).to_dict(),
+        "share_missing_from_V2_by_quintile": d.groupby("q_full")["FRONT_atm_rel_spread"].apply(lambda x: float(x.isna().mean())).to_dict()}
     json.dump(res, open(os.path.join(OUT, "phaseA.json"), "w"), indent=1, default=float)
-    p.to_parquet(os.path.join(DATA, "derived", "v2_phaseA_panel.parquet"), index=False)
-    print(json.dumps(res["composition"], indent=1))
+    print(json.dumps({k: res[k] for k in ("counts", "VERDICT_A", "A_verdict_inputs_LOU", "composition")}, indent=1, default=float))
 
 
 if __name__ == "__main__":

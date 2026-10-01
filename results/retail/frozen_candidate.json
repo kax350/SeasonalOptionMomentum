@@ -1,0 +1,22 @@
+{
+ "frozen_utc": "2026-10-01T03:08:57.431277+00:00",
+ "selected_on": "DEVELOPMENT 2021-01..2023-12 only",
+ "candidate": {
+  "K": 3,
+  "risk": 0.08,
+  "kind": "IFLY10",
+  "universe": "L$",
+  "method": "PAIR2",
+  "vega_match": true,
+  "executable_share": 0.9166666666666666,
+  "max_contracts": 24,
+  "dev_sharpe_H0": -1.3672117438994924,
+  "dev_sharpe_H1": -3.129433503737117,
+  "dev_sharpe_H2_15": -2.4826486590658554,
+  "dev_sharpe_H2_25": -2.2439943421688,
+  "chosen_hedge": "H1",
+  "dev_sharpe_chosen": -3.129433503737117,
+  "dev_mean_ret": -0.009126295516351295,
+  "n_legs": 4
+ }
+}

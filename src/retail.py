@@ -54,14 +54,17 @@ def load_chain(d: dt.date, when: str):
         return None
     snap = pd.read_parquet(p)
     ch = select_chain(snap, d)
-    ch = ch[ch["bid"].notna() & ch["ask"].notna() & (ch["ask"] > 0) & (ch["bid"] <= ch["ask"])]
+    ch = ch[ch["ask"].notna() & (ch["ask"] > 0)].copy()
+    ch["bid"] = ch["bid"].fillna(0.0)   # 2025+ feed reports zero bids as undefined (spec P22)
+    ch = ch[ch["bid"] <= ch["ask"]]
+    ch = ch.drop_duplicates(["root", "cp", "strike"])
     ch["mid"] = (ch["bid"] + ch["ask"]) / 2
     return ch
 
 
 def implied_forward(g: pd.DataFrame, r, T):
-    c = g[g["cp"] == "C"].set_index("strike")["mid"]
-    p = g[g["cp"] == "P"].set_index("strike")["mid"]
+    c = g[g["cp"] == "C"].groupby("strike")["mid"].first()   # de-duplicate strikes
+    p = g[g["cp"] == "P"].groupby("strike")["mid"].first()
     both = c.index.intersection(p.index)
     if len(both) == 0:
         return np.nan

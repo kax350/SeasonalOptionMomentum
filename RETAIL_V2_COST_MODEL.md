@@ -6,7 +6,8 @@ OPRA consolidated NBBO from Databento `cbbo-1m`. The record at 15:59:00 ET carri
 ## Option fills (per leg, per contract)
 | Level | Buy price | Sell price | Use |
 |---|---|---|---|
-| MID | mid | mid | theoretical ceiling only; never a final result |
+| GROSS | mid | mid | no commissions, no hedge fees: pure signal content (ledger row 2, item 10) |
+| MID | mid | mid | mid fills plus all commissions/fees: theoretical ceiling only; never a final result |
 | C25 | mid + 0.25·(ask−mid) | mid − 0.25·(mid−bid) | optimistic retail |
 | **C50** | mid + 0.50·(ask−mid) | mid − 0.50·(mid−bid) | **primary verdict level** |
 | C100 | ask | bid | crossed spread / immediately executable |
@@ -23,6 +24,10 @@ OPRA consolidated NBBO from Databento `cbbo-1m`. The record at 15:59:00 ET carri
 | Stock/ETF hedge commission | $0.005/share, min $1 per order | ×2 |
 | Stock/ETF hedge slippage | 2 bps of traded notional | ×2 |
 | Short stock borrow | 0.25%/yr general collateral | — |
+| Premium financing | rf over (F, X] on net premium paid | — |
+
+- Hedging is computed on the structure's **net** delta (see `src/v2_strategies.py`). Research-mode units are 1 contract per leg, so the $1/order minimum is charged per unit. Phase F recomputes fees with the actual integer position sizes.
+- A long leg whose exit bid is 0 is abandoned at 0, with no exit commission.
 
 ## What is NOT modelled (by design)
 - **Passive / limit-order fills.** We have no trade prints, queue position or quote dynamics. Fill probability and adverse selection cannot be estimated, so no passive model is used. "Touch = fill" is forbidden.

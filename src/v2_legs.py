@@ -78,8 +78,10 @@ def parity_forward(g, r, T):
     return float(k + np.exp(r * T) * d.loc[k])
 
 
-def select_legs(g, Fw):
-    """Return dict tag -> row (ATM_C, ATM_P, C25, P25, C20, P20, C15, P15, C10, P10)."""
+def select_legs(g, Fw, K_force=None):
+    """Return dict tag -> row: ATM_C/ATM_P (strike nearest the forward, both listed), delta-targeted OTM legs
+    C25/P25/C20/P20/C15/P15/C10/P10 (only if |delta - target| <= 0.05), and ATMF_C/ATMF_P at K_force
+    (used on BACK = the FRONT ATM strike, for same-strike calendars)."""
     out = {}
     both = sorted(set(g[g["cp"] == "C"]["strike"]) & set(g[g["cp"] == "P"]["strike"]))
     if not both:
@@ -87,29 +89,57 @@ def select_legs(g, Fw):
     Katm = min(both, key=lambda k: abs(k - Fw))
     out["ATM_C"] = g[(g["cp"] == "C") & (g["strike"] == Katm)].iloc[0]
     out["ATM_P"] = g[(g["cp"] == "P") & (g["strike"] == Katm)].iloc[0]
+    if K_force is not None and K_force in both:
+        out["ATMF_C"] = g[(g["cp"] == "C") & (g["strike"] == K_force)].iloc[0]
+        out["ATMF_P"] = g[(g["cp"] == "P") & (g["strike"] == K_force)].iloc[0]
     calls = g[(g["cp"] == "C") & (g["strike"] > Fw) & g["delta"].notna()]
     puts = g[(g["cp"] == "P") & (g["strike"] < Fw) & g["delta"].notna()]
     for tag, t in DELTAS.items():
         if len(calls):
-            out[f"C{tag}"] = calls.iloc[(calls["delta"] - t).abs().argsort().iloc[0]]
+            c = calls.iloc[(calls["delta"] - t).abs().argsort().iloc[0]]
+            if abs(c["delta"] - t) <= 0.05:
+                out[f"C{tag}"] = c
         if len(puts):
-            out[f"P{tag}"] = puts.iloc[(puts["delta"] + t).abs().argsort().iloc[0]]
+            pp = puts.iloc[(puts["delta"] + t).abs().argsort().iloc[0]]
+            if abs(pp["delta"] + t) <= 0.05:
+                out[f"P{tag}"] = pp
     return out
 
 
-def hedge_leg(K, cp, iv, r, t_marks, S_marks, exp_days, S_exit):
-    """Per-contract delta-hedge P&L and turnover. t_marks in days since F (entry 15:59 = 0.999 day frac),
-    S_marks spot at each mark; position held to the final mark, hedge closed at S_exit."""
+def delta_path(K, cp, iv, r, t_marks, S_marks, exp_days):
     T = np.maximum((exp_days - t_marks) / 365.0, 1e-6)
     sq = iv * np.sqrt(T)
     d1 = (np.log(S_marks / K) + (r + 0.5 * iv * iv) * T) / sq
-    D = np.where(cp == "C", norm.cdf(d1), norm.cdf(d1) - 1.0) * 100.0  # shares of delta per contract
+    return np.where(cp == "C", norm.cdf(d1), norm.cdf(d1) - 1.0) * 100.0  # shares of delta per contract
+
+
+def hedge_from_path(D, S_marks, S_exit):
+    """Hedge stats for a position with delta path D (shares) at marks S_marks, closed at S_exit.
+    H1 = hedge only at entry; H2 = re-hedge at every mark. Turnover split so it can be netted at structure level:
+    entry |D0|, exit |D_last| and the daily changes sum|dD|."""
     S_next = np.append(S_marks[1:], S_exit)
     h1 = -D[0] * (S_exit - S_marks[0])
     h2 = float(np.sum(-D * (S_next - S_marks)))
-    to1 = abs(D[0]) * (S_marks[0] + S_exit)
-    to2 = abs(D[0]) * S_marks[0] + float(np.sum(np.abs(np.diff(D)) * S_marks[1:])) + abs(D[-1]) * S_exit
-    return h1, h2, to1, to2, D[0]
+    chg_sh = float(np.sum(np.abs(np.diff(D))))
+    chg_turn = float(np.sum(np.abs(np.diff(D)) * S_marks[1:]))
+    return h1, h2, chg_sh, chg_turn
+
+
+def h3_threshold(D, S_marks, S_exit, thr=25.0):
+    """H3: re-hedge to zero only when |net delta + hedge| > thr shares. Returns pnl, shares traded, orders."""
+    h, pnl, sh, orders = 0.0, 0.0, 0.0, 0
+    for i in range(len(D)):
+        if i > 0:
+            pnl += h * (S_marks[i] - S_marks[i - 1])
+        if i == 0 or abs(D[i] + h) > thr:
+            tr = -D[i] - h
+            if abs(tr) > 1e-9:
+                sh += abs(tr); orders += 1
+            h = -D[i]
+    pnl += h * (S_exit - S_marks[-1])
+    if abs(h) > 1e-9:
+        sh += abs(h); orders += 1
+    return pnl, sh, orders
 
 
 def process_month(args):
@@ -131,9 +161,7 @@ def process_month(args):
     tfB, ltB = expiry_after(F, 2)
     chF = norm_chain(pick_chain(snapF, tfF, ltF))
     chB = norm_chain(pick_chain(snapF, tfB, ltB))
-    # feed regime on X: share of FRONT symbols present on the expiration-day snapshot
     x_cov = float(chF["symbol"].isin(set(xq.index)).mean()) if len(chF) else np.nan
-    # implied spot on X from the X-date next-month chain (for exit-side data validation)
     tfX, ltX = expiry_after(X, 1)
     chX = norm_chain(pick_chain(snapX[snapX["root"].isin(roots_ok)], tfX, ltX))
     chX["exdate_trade"] = pd.Timestamp(ltX)
@@ -145,6 +173,7 @@ def process_month(args):
     rF = float(rates.linear_rate(pd.Timestamp(F), [daysF])[0]) / 100
     rB = float(rates.linear_rate(pd.Timestamp(F), [daysB])[0]) / 100
     TF, TB = (daysF + 1 / 1440) / 365, (daysB + 1 / 1440) / 365
+    hold_days = (pd.Timestamp(X) - pd.Timestamp(F)).days
     legs, roots = [], []
     gB_all = dict(tuple(chB.groupby("root")))
     for root, gF in chF.groupby("root"):
@@ -157,55 +186,56 @@ def process_month(args):
         if not np.isfinite(FwF) or FwF <= 0:
             continue
         S0 = FwF * np.exp(-rF * TF)
-        if abs(S0 / S_close_F - 1) > 0.05:          # start-side data validation (DoltHub vs options)
+        if abs(S0 / S_close_F - 1) > 0.05:          # start-side data validation (F information only)
             continue
         S_X = info["closeX"].get(root, np.nan)
-        if not np.isfinite(S_X):
-            continue
+        delisted = not np.isfinite(S_X)
+        days = path[(path.index > pd.Timestamp(F)) & (path.index < pd.Timestamp(X))].astype(float)
+        S_exit_h = S_X if not delisted else (float(days.iloc[-1]) if len(days) else S_close_F)
         sx_impl = spotX.get(root, np.nan) if len(spotX) else np.nan
-        if np.isfinite(sx_impl) and abs(sx_impl / S_X - 1) > 0.05:   # exit-side validation
-            continue
+        x_flag = bool(np.isfinite(sx_impl) and np.isfinite(S_X) and abs(sx_impl / S_X - 1) > 0.05)
         rec_root = {"F": pd.Timestamp(F), "X": pd.Timestamp(X), "root": root, "is_etf": is_etf, "S0": S0,
-                    "S_X": S_X, "x_cov": x_cov}
-        ok_root = True
-        for tag_exp, g, r, T, exp_days, lt in (("FRONT", gF, rF, TF, daysF + 16 / 24, ltF),
-                                               ("BACK", gB_all.get(root), rB, TB, daysB + 16 / 24, ltB)):
+                    "S_close_F": S_close_F, "S_X": S_X, "delisted": delisted, "x_flag": x_flag, "x_cov": x_cov,
+                    "rf_hold": rF * hold_days / 365}
+        t_marks = np.concatenate([[16 / 24], (days.index - pd.Timestamp(F)).days.values + 16 / 24])
+        S_marks = np.concatenate([[S_close_F], days.values])
+        ok_root, K_front = True, None
+        for tag_exp, g, r, T, exp_days in (("FRONT", gF, rF, TF, daysF + 16 / 24), ("BACK", gB_all.get(root), rB, TB, daysB + 16 / 24)):
             if g is None or g.empty:
                 if tag_exp == "FRONT":
                     ok_root = False
                 continue
             g = g.copy()
             Fw = parity_forward(g, r, T)
+            S_e = Fw * np.exp(-r * T) if np.isfinite(Fw) and Fw > 0 else S0    # prepaid forward of this expiry
             if not np.isfinite(Fw):
                 Fw = S0 * np.exp(r * T)
-            iv = implied_vol(g["mid"].values, S0, g["strike"].values, T, r, g["cp"].values)
+            iv = implied_vol(g["mid"].values, S_e, g["strike"].values, T, r, g["cp"].values)
             g["iv"] = iv
             ivf = np.where(np.isnan(iv), np.nanmedian(iv) if np.isfinite(iv).any() else 0.3, iv)
-            d, gm, vg, th = bs_greeks(S0, g["strike"].values, T, r, ivf, g["cp"].values)
+            d, gm, vg, th = bs_greeks(S_e, g["strike"].values, T, r, ivf, g["cp"].values)
             g["delta"], g["gamma"], g["vega"], g["theta"] = np.where(np.isnan(iv), np.nan, d), gm, vg, th
-            sel = select_legs(g, Fw)
+            sel = select_legs(g, Fw, K_force=K_front if tag_exp == "BACK" else None)
             if "ATM_C" not in sel:
                 if tag_exp == "FRONT":
                     ok_root = False
                 continue
             atm = (sel["ATM_C"], sel["ATM_P"])
-            if tag_exp == "FRONT" and not is_etf:
-                rs = max((a["ask"] - a["bid"]) / a["mid"] if a["bid"] > 0 else np.inf for a in atm)
-                if rs > 0.25:          # loose pre-screen (looser than any LOU variant)
+            rs = max((a["ask"] - a["bid"]) / a["mid"] if a["bid"] > 0 else np.inf for a in atm)
+            if tag_exp == "FRONT":
+                K_front = float(atm[0]["strike"])
+                if not is_etf and rs > 0.25:       # loose pre-screen (looser than any LOU variant)
                     ok_root = False
                     break
             rec_root[f"{tag_exp}_Fwd"] = Fw
             rec_root[f"{tag_exp}_atm_strike"] = float(atm[0]["strike"])
             rec_root[f"{tag_exp}_atm_iv"] = float(np.nanmean([atm[0]["iv"], atm[1]["iv"]]))
-            rec_root[f"{tag_exp}_atm_rel_spread"] = float(max((a["ask"] - a["bid"]) / a["mid"] if a["bid"] > 0 else np.inf for a in atm))
+            rec_root[f"{tag_exp}_atm_rel_spread"] = float(rs)
             rec_root[f"{tag_exp}_atm_bid_ok"] = bool(all(a["bid"] > 0 for a in atm))
             rec_root[f"{tag_exp}_atm_min_size"] = float(min(min(a["bid_sz"], a["ask_sz"]) for a in atm))
             if "P25" in sel and "C25" in sel:
                 rec_root[f"{tag_exp}_skew25"] = float(sel["P25"]["iv"] - sel["C25"]["iv"])
-            # hedging marks
-            days = path[(path.index > pd.Timestamp(F)) & (path.index < pd.Timestamp(X))]
-            t_marks = np.concatenate([[15.98 / 24], (days.index - pd.Timestamp(F)).days.values + 16 / 24])
-            S_marks = np.concatenate([[S0], days.values.astype(float)])
+            Dpaths = {}
             for tag, row in sel.items():
                 ivl = row["iv"] if np.isfinite(row["iv"]) else np.nanmedian(g["iv"])
                 if not np.isfinite(ivl):
@@ -213,22 +243,30 @@ def process_month(args):
                 q = xq.loc[row["symbol"]] if row["symbol"] in xq.index else None
                 xb, xa = (float(q["bid"]), float(q["ask"])) if q is not None else (np.nan, np.nan)
                 missing = q is None
-                if missing and tag_exp == "FRONT":       # conservative synthetic exit market (V1 rule)
+                if missing and tag_exp == "FRONT" and not delisted:   # conservative synthetic exit market
                     intr = max(S_X - row["strike"], 0) if row["cp"] == "C" else max(row["strike"] - S_X, 0)
                     if intr > 0:
                         h = max(0.05, 0.01 * intr)
                         xb, xa = max(intr - h, 0.0), intr + h
                     else:
                         xb, xa = 0.0, 0.05
-                h1, h2, to1, to2, D0 = hedge_leg(float(row["strike"]), row["cp"], float(ivl), r, t_marks, S_marks,
-                                                 exp_days, S_X)
+                D = delta_path(float(row["strike"]), row["cp"], float(ivl), r, t_marks, S_marks, exp_days)
+                Dpaths[tag] = D
+                h1, h2, chg_sh, chg_turn = hedge_from_path(D, S_marks, S_exit_h)
                 legs.append({"F": pd.Timestamp(F), "X": pd.Timestamp(X), "root": root, "exp": tag_exp, "tag": tag,
                              "symbol": row["symbol"], "cp": row["cp"], "strike": float(row["strike"]),
                              "bid": float(row["bid"]), "ask": float(row["ask"]), "bid_sz": float(row["bid_sz"]),
-                             "ask_sz": float(row["ask_sz"]), "iv": float(ivl), "delta": float(D0) / 100,
+                             "ask_sz": float(row["ask_sz"]), "iv": float(ivl), "delta": float(row["delta"]) if np.isfinite(row["delta"]) else np.nan,
                              "gamma": float(row["gamma"]), "vega": float(row["vega"]), "theta": float(row["theta"]),
                              "x_bid": xb, "x_ask": xa, "x_missing": missing,
-                             "h1_pnl": h1, "h2_pnl": h2, "h1_turn": to1, "h2_turn": to2})
+                             "D0": float(D[0]), "D_last": float(D[-1]), "S_hedge0": float(S_marks[0]), "S_hedge_exit": float(S_exit_h),
+                             "h1_pnl": h1, "h2_pnl": h2, "chg_sh": chg_sh, "chg_turn": chg_turn, "n_marks": int(len(D))})
+            # H3 (threshold 25 shares per unit) for the straddle unit of this expiry
+            if "ATM_C" in Dpaths and "ATM_P" in Dpaths:
+                Dst = Dpaths["ATM_C"] + Dpaths["ATM_P"]
+                p3, sh3, o3 = h3_threshold(Dst, S_marks, S_exit_h)
+                rec_root[f"{tag_exp}_straddle_h3_pnl"], rec_root[f"{tag_exp}_straddle_h3_sh"], rec_root[f"{tag_exp}_straddle_h3_orders"] = p3, sh3, o3
+                rec_root[f"{tag_exp}_straddle_h2_orders"] = int(np.sum(np.abs(np.diff(Dst)) > 0.5)) + 2
         if ok_root:
             roots.append(rec_root)
     L = pd.DataFrame(legs)
@@ -290,7 +328,7 @@ def build_inputs(pairs):
         lr = np.log1p(fut)
         rv = (lr ** 2).sum()
         resid = lr.sub(lr["SPY"].values[:, None] * beta.reindex(lr.columns).values[None, :])
-        idio = (resid ** 2).sum()
+        idio = (resid ** 2).sum(min_count=1).where(beta.reindex(lr.columns).notna())
         jump = (lr ** 2).max() / rv
         f = pd.DataFrame({"adv20": adv, "hv21": hv21, "hv252": hv252, "beta": beta, "rv": rv, "rv_idio": idio,
                           "jump_share": jump, "n_days": lr.notna().sum()})

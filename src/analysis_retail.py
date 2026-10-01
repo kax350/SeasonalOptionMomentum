@@ -163,8 +163,11 @@ def account_series(uni, pos, universe, K, kind, hedge, risk_pct, vega_match=Fals
 
 
 def executable(df, K):
+    """Share of months with >= min(K,2) long and >= min(K,2) short positions actually sized (qty >= 1)."""
     need = min(K, 2)
-    ok = (df.get("n_long", 0) >= need) & (df.get("n_short", 0) >= need)
+    if df.empty or "n_long" not in df or "n_short" not in df:
+        return 0.0
+    ok = (df["n_long"].fillna(0) >= need) & (df["n_short"].fillna(0) >= need)
     return float(ok.mean())
 
 
@@ -248,7 +251,7 @@ def dev_selection(uni, pos):
                     dfs[h] = df
                     sh[h] = sharpe(df["ret"])
                 ex = executable(dfs["H0"], K)
-                maxc = int(dfs["H0"].get("contracts", pd.Series([0])).max())
+                maxc = int(dfs["H0"]["contracts"].fillna(0).max()) if "contracts" in dfs["H0"] else 0
                 hedge = "H0" if sh["H0"] > 0.5 else ("H1" if sh["H1"] > 0.5 else
                                                       ("H2_15" if sh["H2_15"] > 0.5 else ("H2_25" if sh["H2_25"] > 0.5 else "H1")))
                 rec = {"K": K, "risk": risk, "kind": kind, "universe": universe, "method": method, "vega_match": vm,

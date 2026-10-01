@@ -92,6 +92,14 @@ def build_legs(g: pd.DataFrame, kind: str, side: int, F: float):
         c = pick_delta(g, "C", 0.25, "above", F)
         p = pick_delta(g, "P", -0.25, "below", F)
         return None if c is None or p is None else [(c, side), (p, side)]
+    if kind.endswith("_UP") or kind.endswith("_DN"):   # kill test 16: ATM executed one listed strike off
+        base = kind[:-3]
+        ks = sorted(strikes_both)
+        i = ks.index(K_atm) + (1 if kind.endswith("_UP") else -1)
+        if i < 0 or i >= len(ks):
+            return None
+        F_shift = ks[i]
+        return build_legs(g, base, side, F_shift)
     if kind in ("IFLY10", "IFLY15"):
         t = 0.10 if kind == "IFLY10" else 0.15
         c = pick_delta(g, "C", t, "above", K_atm)
